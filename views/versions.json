@@ -1,0 +1,10 @@
+{
+  "definitions": [
+    {
+      "name": "softwareUploaderVersion",
+      "priority": 350,
+      "fragments": ["name", "version", "file", "status"],
+      "columns": ["name", "version", "softwareType", "architecture", "status", "error"]
+    }
+  ]
+}

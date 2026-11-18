@@ -1,0 +1,16 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/reubenmiller/go-c8y-cli/v2/tools/schema/extension.json
+version: v1
+
+# Name of the extension and its command (c8y software-uploader)
+name: software-uploader
+
+# The binary is mounted at the extension root. Arguments which do not match a declared
+# command are passed to the binary unchanged
+binary:
+  path: bin/c8y-software-uploader
+  completion: cobra
+
+commands:
+  - name: upload
+    description: Upload software packages to the Cumulocity software repository
+    output: json
