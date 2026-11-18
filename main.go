@@ -47,6 +47,7 @@ type uploadOptions struct {
 	replace      bool
 	noProgress   bool
 	logLevel     string
+	text         bool
 }
 
 func newUploadCmd() *cobra.Command {
@@ -61,7 +62,11 @@ A software item is created per name, architecture and type, and each file is
 uploaded as a version of it. Existing versions are not changed, unless --replace
 is used, so the command can be run again safely.
 
-Use the c8y --dry flag to show what would be uploaded without changing anything.`,
+Use the c8y --dry flag to show what would be uploaded without changing anything.
+
+The command writes one JSON result per version, which c8y formats (--output,
+--select, views). Use --text to show a human readable report instead, which is
+written to stderr while the upload runs.`,
 		Example: `  c8y software-uploader upload --dir ./dist --pattern "*.deb" --dry
   # Show which Debian packages would be uploaded
 
@@ -72,7 +77,10 @@ Use the c8y --dry flag to show what would be uploaded without changing anything.
   # Upload a single file
 
   c8y software-uploader upload --dir ./firmware --type-map "*.bin=firmware" --output table
-  # Map files to a software type, and show the results as a table`,
+  # Map files to a software type, and show the results as a table
+
+  c8y software-uploader upload --dir ./dist --pattern "*.deb" --text
+  # Show a human readable report instead of the JSON results`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runUpload(cmd.Context(), opts)
@@ -91,6 +99,7 @@ Use the c8y --dry flag to show what would be uploaded without changing anything.
 	flags.BoolVar(&opts.replace, "replace", false, "Replace the binary of versions which already exist")
 	flags.BoolVar(&opts.noProgress, "no-progress", false, "Don't show the progress bar. It is not shown when stderr is not a terminal")
 	flags.StringVar(&opts.logLevel, "log-level", "error", "Log level: error, warn, info or debug. debug also logs the HTTP requests")
+	flags.BoolVar(&opts.text, "text", false, "Show a human readable report (on stderr) instead of the JSON results")
 	cmd.MarkFlagsMutuallyExclusive("dir", "file")
 	cmd.MarkFlagsOneRequired("dir", "file")
 	_ = cmd.MarkFlagDirname("dir")
@@ -117,20 +126,40 @@ func runUpload(ctx context.Context, opts *uploadOptions) error {
 	}
 	dryRun := extCtx.DryRun()
 
+	// text is nil when the JSON results are written
+	var text *textReport
+	if opts.text {
+		text = &textReport{w: os.Stderr}
+		text.Header()
+		text.Scanning(opts)
+	}
+
 	files, err := collectFiles(opts)
 	if err != nil {
 		return err
 	}
+	if text != nil {
+		text.Found(opts, files)
+	}
 	if len(files) == 0 {
-		info("No files found matching pattern(s): %s", strings.Join(opts.patternsOrDefault(), ", "))
+		if text == nil {
+			info("No files found matching pattern(s): %s", strings.Join(opts.patternsOrDefault(), ", "))
+		}
 		return nil
 	}
 
 	var infos []*SoftwareInfo
+	skip := func(file string, err error) {
+		if text != nil {
+			text.Skipped(file, err)
+		} else {
+			slog.Warn("Skipping file", "file", file, "error", err)
+		}
+	}
 	for _, f := range files {
 		parsed, err := ParseSoftwareFromFilename(f, opts.softwareType, opts.namePrefix, typeMappings...)
 		if err != nil {
-			slog.Warn("Skipping file", "file", f, "error", err)
+			skip(f, err)
 			continue
 		}
 		// The parser still runs, so that the version is removed from the name
@@ -138,20 +167,32 @@ func runUpload(ctx context.Context, opts *uploadOptions) error {
 			parsed.Version = opts.version
 		}
 		if err := ValidateSoftwareInfo(parsed); err != nil {
-			slog.Warn("Skipping file", "file", f, "error", err)
+			skip(f, err)
 			continue
 		}
 		infos = append(infos, parsed)
 	}
 	if len(infos) == 0 {
-		info("No valid software packages found in %d file(s)", len(files))
+		if text != nil {
+			text.NoValidPackages()
+		} else {
+			info("No valid software packages found in %d file(s)", len(files))
+		}
 		return nil
 	}
 
 	summary := CreateSummary(infos)
-	info("Found %d software package(s), %d version(s)", summary.TotalSoftware, summary.TotalVersions)
+	if text != nil {
+		text.Plan(summary)
+	} else {
+		info("Found %d software package(s), %d version(s)", summary.TotalSoftware, summary.TotalVersions)
+	}
 
 	if dryRun {
+		if text != nil {
+			text.DryRunDone()
+			return nil
+		}
 		return extsdk.Print(plannedResults(infos))
 	}
 
@@ -179,11 +220,21 @@ func runUpload(ctx context.Context, opts *uploadOptions) error {
 		Force:        opts.replace,
 	}
 
+	if text != nil {
+		text.Uploading()
+	}
+
 	// stdout is used for the JSON output, so the progress bar is written to stderr
 	showProgress := !opts.noProgress && term.IsTerminal(int(os.Stderr.Fd()))
 	bar := progressbar.NewOptions(len(infos),
 		progressbar.OptionSetWriter(os.Stderr),
 		progressbar.OptionSetDescription("Uploading"),
+		progressbar.OptionSetTheme(progressbar.Theme{
+			Saucer:        "█",
+			SaucerPadding: "░",
+			BarStart:      "[",
+			BarEnd:        "]",
+		}),
 		progressbar.OptionShowCount(),
 		progressbar.OptionSetWidth(40),
 		progressbar.OptionSetPredictTime(true),
@@ -196,6 +247,7 @@ func runUpload(ctx context.Context, opts *uploadOptions) error {
 		_ = bar.Set(completed)
 	})
 	_ = bar.Finish()
+	elapsed := time.Since(start)
 
 	versions := result.Versions
 	if len(versions) == 0 && len(result.Errors) > 0 {
@@ -210,13 +262,18 @@ func runUpload(ctx context.Context, opts *uploadOptions) error {
 			failed++
 		}
 	}
-	info("Processed %d version(s) in %.1fs: %d new, %d replaced, %d existing, %d failed",
-		len(versions), time.Since(start).Seconds(),
-		result.VersionsCreated, result.VersionsReplaced, result.VersionsFound, failed)
 
-	if err := extsdk.Print(versions); err != nil {
-		return err
+	if text != nil {
+		text.Results(result, elapsed)
+	} else {
+		info("Processed %d version(s) in %.1fs: %d new, %d replaced, %d existing, %d failed",
+			len(versions), elapsed.Seconds(),
+			result.VersionsCreated, result.VersionsReplaced, result.VersionsFound, failed)
+		if err := extsdk.Print(versions); err != nil {
+			return err
+		}
 	}
+
 	if failed > 0 {
 		return fmt.Errorf("failed to upload %d version(s)", failed)
 	}
