@@ -61,6 +61,42 @@ c8y software-uploader upload --dir ./dist --pattern "*.deb" --select name,versio
 
 Messages and the progress bar are written to stderr. The exit code is non-zero if any version failed.
 
+### Text output
+
+Use `--text` to show a human readable report instead of the JSON results:
+
+```sh
+c8y software-uploader upload --dir ./dist --pattern "*.deb" --text
+```
+
+```
+╔══════════════════════════════════════════╗
+║   Software Package Uploader for C8Y      ║
+╚══════════════════════════════════════════╝
+
+🔍 Scanning directory: ./dist
+📦 Found 3 file(s) matching pattern(s): *.deb
+
+📋 Upload Plan:
+  • c8y-command-plugin [all/apt]: 1 version(s) [0.3.0]
+  • tedge [arm64/apt]: 2 version(s) [1.4.1, 1.4.2]
+
+📊 Summary: 2 software package(s), 3 version(s) total
+
+📤 Uploading versions...
+
+✅ Successfully processed 3 version(s)
+   📤 Newly uploaded: 2
+   ♻️  Already existed: 1
+
+⏱️  Total time: 2.1s
+
+──────────────────────────────────────────────────
+Total: 3 processed (2 new, 0 replaced, 1 existing), 0 failed
+```
+
+The report is written to stderr, so it is shown while the upload runs (c8y collects the stdout of the command until it exits). Use `2>&1` to save it to a file. The c8y output flags (`--output`, `--select`, `--filter`) don't apply to the text report.
+
 ### Flags
 
 | Flag | Default | Description |
@@ -76,6 +112,7 @@ Messages and the progress bar are written to stderr. The exit code is non-zero i
 | `--replace` | | Replace the binary of versions which already exist |
 | `--no-progress` | | Don't show the progress bar. It is not shown when stderr is not a terminal |
 | `--log-level` | `error` | `error`, `warn`, `info`, or `debug`. `debug` also logs the HTTP requests |
+| `--text` | | Show a human readable report (on stderr) instead of the JSON results |
 
 The go-c8y-cli global flags `--dry`, `--session`, `--sessionMode`, `--output`, `--select`, and `--filter` work as for other c8y commands. Compared with the SDK example, `--force` is called `--replace`, and `--verbose`/`--debug` are replaced by `--log-level`, as c8y uses these flag names itself.
 
